@@ -27,6 +27,9 @@ var ErrStepLocalMsg = errors.New("raft: cannot step raft local message")
 // but there is no peer found in raft.Prs for that node.
 var ErrStepPeerNotFound = errors.New("raft: cannot step as peer not found")
 
+// ErrInitFail is returned when the raft node initialization is failed
+var ErrInitFail = errors.New("raft: cannot initialize a new raftnode")
+
 // SoftState provides state that is volatile and does not need to be persisted to the WAL.
 type SoftState struct {
 	Lead      uint64
@@ -70,12 +73,35 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	ready *Ready
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	raft := newRaft(config)
+
+	if raft == nil {
+		return nil, ErrInitFail
+	}
+
+	rn := RawNode{
+		Raft: raft,
+		ready: &Ready{
+			SoftState: &SoftState{
+				Lead:      raft.Lead,
+				RaftState: raft.State,
+			},
+
+			HardState: pb.HardState{
+				Term:   raft.Term,
+				Vote:   raft.Vote,
+				Commit: raft.RaftLog.committed,
+			},
+		},
+	}
+
+	return &rn, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,7 +169,7 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	return *rn.ready
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.

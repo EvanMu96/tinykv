@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"log"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -26,10 +27,18 @@ const None uint64 = 0
 // StateType represents the role of a node in a cluster.
 type StateType uint64
 
+type TermCheckResult uint8
+
 const (
 	StateFollower StateType = iota
 	StateCandidate
 	StateLeader
+)
+
+const (
+	CurrentTerm TermCheckResult = iota
+	OlderTermDiscard
+	NewerTermUpdate
 )
 
 var stmap = [...]string{
@@ -170,6 +179,7 @@ func newRaft(c *Config) *Raft {
 		id:               c.ID,
 		Prs:              make(map[uint64]*Progress),
 		State:            StateFollower,
+		Term:             1,
 		votes:            make(map[uint64]bool),
 		RaftLog:          newLog(c.Storage),
 		msgs:             make([]pb.Message, 0),
@@ -198,18 +208,6 @@ func (r *Raft) sendAppend(to uint64) bool {
 	r.msgs = append(r.msgs, msg)
 
 	return false
-}
-
-// sendHeartbeat sends a heartbeat RPC to the given peer.
-func (r *Raft) sendHeartbeat(to uint64) {
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgBeat,
-		To:      to,
-		From:    r.id,
-		Term:    r.Term,
-	}
-
-	r.msgs = append(r.msgs, msg)
 }
 
 func (r *Raft) sendRequestVote() {
@@ -244,11 +242,8 @@ func (r *Raft) tick() {
 	case StateLeader:
 		r.heartbeatElapsed++
 		if r.heartbeatElapsed >= r.heartbeatTimeout {
-			for k := range r.Prs {
-				r.sendHeartbeat(k)
-			}
+			r.broadcastHeartBeatMsg()
 		}
-
 	}
 }
 
@@ -258,6 +253,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Lead = lead
 	r.Term = term
 	r.State = StateFollower
+	log.Printf("raft: raft instance %d switch to folower state, term: %d", r.id, r.Term)
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -279,33 +275,36 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	if r.State != StateCandidate {
+		return
+	}
 	r.State = StateLeader
 	r.Lead = r.id
 	r.electionElapsed = 0
 	r.heartbeatTimeout = 0
-	r.Term++
+	// clear votes
+	r.votes = make(map[uint64]bool)
 }
 
 // Step the entrance of handle message, see `MessageType`
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	if r.Prs[m.From] == nil {
-		return ErrStepPeerNotFound
-	}
-
 	switch r.State {
 	case StateFollower:
 		switch m.MsgType {
 		case pb.MessageType_MsgAppend:
+			termCheck := r.checkMsgTerm(m.Term)
+			switch termCheck {
+			case OlderTermDiscard:
+				return errors.New("out of date")
+			case NewerTermUpdate:
+				r.becomeFollower(m.GetTerm(), m.GetFrom())
+			}
 			r.handleAppendEntries(m)
 		case pb.MessageType_MsgBeat:
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgRequestVote:
-			if m.Term <= r.Term {
-				return ErrProposalDropped
-			}
-
 			if m.Index < r.RaftLog.LastIndex() {
 				return ErrProposalDropped
 			}
@@ -330,11 +329,29 @@ func (r *Raft) Step(m pb.Message) error {
 	case StateCandidate:
 		switch m.MsgType {
 		case pb.MessageType_MsgAppend:
-			r.becomeFollower(m.Term, m.From)
+			termCheck := r.checkMsgTerm(m.Term)
+			switch termCheck {
+			case OlderTermDiscard:
+				return errors.New("out of date")
+			case NewerTermUpdate:
+				r.becomeFollower(m.GetTerm(), m.GetFrom())
+			}
+			r.handleAppendEntries(m)
 		case pb.MessageType_MsgRequestVoteResponse:
 		}
 	case StateLeader:
 		switch m.MsgType {
+		case pb.MessageType_MsgAppend:
+			termCheck := r.checkMsgTerm(m.Term)
+			switch termCheck {
+			case OlderTermDiscard:
+				return errors.New("out of date")
+			case NewerTermUpdate:
+				r.becomeFollower(m.GetTerm(), m.GetFrom())
+				r.handleAppendEntries(m)
+			default:
+				return nil
+			}
 		case pb.MessageType_MsgRequestVote:
 
 		}
@@ -351,6 +368,10 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 	if m.Term < r.Term {
 		return
+	}
+
+	if m.Term > r.Term {
+		r.becomeFollower(m.GetFrom(), m.GetFrom())
 	}
 
 	for idx := range m.Entries {
@@ -373,6 +394,7 @@ func (r *Raft) reset() {
 	r.heartbeatElapsed = 0
 	r.votes = make(map[uint64]bool)
 	r.Lead = 0
+	r.Term = 1
 }
 
 // handleSnapshot handle Snapshot RPC request
@@ -388,4 +410,34 @@ func (r *Raft) addNode(id uint64) {
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+}
+
+func (r *Raft) checkMsgTerm(term uint64) TermCheckResult {
+	if r.Term == term {
+		return CurrentTerm
+	}
+
+	if r.Term < term {
+		return NewerTermUpdate
+	}
+
+	return OlderTermDiscard
+}
+
+type broadcastMsgFunc func()
+
+func (r *Raft) broadcastHeartBeatMsg() {
+	for k := range r.Prs {
+		if k == r.id {
+			continue
+		}
+		msg := pb.Message{
+			MsgType: pb.MessageType_MsgHeartbeat,
+			To:      k,
+			From:    r.id,
+			Term:    r.Term,
+		}
+
+		r.msgs = append(r.msgs, msg)
+	}
 }
