@@ -16,7 +16,6 @@ package raft
 
 import (
 	"errors"
-	"log"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -179,7 +178,8 @@ func newRaft(c *Config) *Raft {
 		id:               c.ID,
 		Prs:              make(map[uint64]*Progress),
 		State:            StateFollower,
-		Term:             1,
+		Term:             0,
+		Vote:             0,
 		votes:            make(map[uint64]bool),
 		RaftLog:          newLog(c.Storage),
 		msgs:             make([]pb.Message, 0),
@@ -189,6 +189,9 @@ func newRaft(c *Config) *Raft {
 	}
 
 	for _, pr_id := range c.peers {
+		if pr_id == r.id {
+			continue
+		}
 		r.Prs[pr_id] = &Progress{}
 	}
 
@@ -210,34 +213,21 @@ func (r *Raft) sendAppend(to uint64) bool {
 	return false
 }
 
-func (r *Raft) sendRequestVote() {
-
-	index := r.RaftLog.LastIndex()
-	term, err := r.RaftLog.Term(index)
-
-	if err != nil {
-		return
-	}
-
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgRequestVote,
-		From:    r.id,
-		Term:    r.Term,
-		LogTerm: term,
-		Index:   index,
-	}
-
-	r.msgs = append(r.msgs, msg)
-}
-
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
 	switch r.State {
-	case StateFollower, StateCandidate:
+	case StateFollower:
 		r.electionElapsed++
 		if r.electionElapsed >= r.electionTimeout {
 			r.becomeCandidate()
+			r.broadcastRequestVote()
+		}
+	case StateCandidate:
+		r.electionElapsed++
+		if r.electionElapsed >= r.electionTimeout {
+			r.becomeCandidate()
+			r.broadcastRequestVote()
 		}
 	case StateLeader:
 		r.heartbeatElapsed++
@@ -253,22 +243,24 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Lead = lead
 	r.Term = term
 	r.State = StateFollower
-	log.Printf("raft: raft instance %d switch to folower state, term: %d", r.id, r.Term)
+	r.Vote = 0
+	r.heartbeatElapsed = 0
+	// log.Printf("raft: raft instance %d switch to follower state, term: %d", r.id, r.Term)
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	r.Term += 1
 	r.State = StateCandidate
+	r.Vote = 0
 	r.electionElapsed = 0
-	r.heartbeatElapsed = 0
-	if len(r.Prs) == 0 {
-		r.becomeLeader()
-		return
-	}
-	r.sendRequestVote()
 	// vote to self
 	r.votes[r.id] = true
+	if len(r.Prs) == 0 {
+		r.becomeLeader()
+	}
+	// log.Printf("raft: raft instance %d switch to candidate state, term: %d", r.id, r.Term)
 }
 
 // becomeLeader transform this peer's state to leader
@@ -284,12 +276,25 @@ func (r *Raft) becomeLeader() {
 	r.heartbeatTimeout = 0
 	// clear votes
 	r.votes = make(map[uint64]bool)
+	// log.Printf("raft: raft instance %d switch to leader state, term: %d", r.id, r.Term)
 }
 
 // Step the entrance of handle message, see `MessageType`
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	if IsLocalMsg(m.MsgType) {
+		switch m.MsgType {
+		case pb.MessageType_MsgHup:
+			r.becomeCandidate()
+			r.broadcastRequestVote()
+		case pb.MessageType_MsgBeat:
+
+		case pb.MessageType_MsgPropose:
+		}
+		return nil
+	}
+
 	switch r.State {
 	case StateFollower:
 		switch m.MsgType {
@@ -302,29 +307,13 @@ func (r *Raft) Step(m pb.Message) error {
 				r.becomeFollower(m.GetTerm(), m.GetFrom())
 			}
 			r.handleAppendEntries(m)
-		case pb.MessageType_MsgBeat:
+		case pb.MessageType_MsgHeartbeat:
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgRequestVote:
-			if m.Index < r.RaftLog.LastIndex() {
-				return ErrProposalDropped
-			}
-
-			term, err := r.RaftLog.Term(m.Index)
-
+			err := r.handleRequestVote(m)
 			if err != nil {
-				return ErrProposalDropped
+				return err
 			}
-
-			if term <= r.Term {
-				return ErrProposalDropped
-			}
-
-			r.msgs = append(r.msgs, pb.Message{
-				MsgType: pb.MessageType_MsgRequestVoteResponse,
-				From:    r.id,
-				To:      m.From,
-				Reject:  false,
-			})
 		}
 	case StateCandidate:
 		switch m.MsgType {
@@ -337,7 +326,16 @@ func (r *Raft) Step(m pb.Message) error {
 				r.becomeFollower(m.GetTerm(), m.GetFrom())
 			}
 			r.handleAppendEntries(m)
+		case pb.MessageType_MsgRequestVote:
+			err := r.handleRequestVote(m)
+			if err != nil {
+				return err
+			}
 		case pb.MessageType_MsgRequestVoteResponse:
+			if r.checkMsgTerm(m.GetTerm()) != OlderTermDiscard {
+				r.votes[m.GetFrom()] = !m.GetReject()
+			}
+			r.checkVoteResult()
 		}
 	case StateLeader:
 		switch m.MsgType {
@@ -352,8 +350,6 @@ func (r *Raft) Step(m pb.Message) error {
 			default:
 				return nil
 			}
-		case pb.MessageType_MsgRequestVote:
-
 		}
 	}
 	return nil
@@ -389,14 +385,6 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	r.electionElapsed = 0
 }
 
-func (r *Raft) reset() {
-	r.electionElapsed = 0
-	r.heartbeatElapsed = 0
-	r.votes = make(map[uint64]bool)
-	r.Lead = 0
-	r.Term = 1
-}
-
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
@@ -413,18 +401,22 @@ func (r *Raft) removeNode(id uint64) {
 }
 
 func (r *Raft) checkMsgTerm(term uint64) TermCheckResult {
-	if r.Term == term {
+	if r.State == StateCandidate || r.State == StateLeader {
+		if term >= r.Term {
+			return NewerTermUpdate
+		}
+		return OlderTermDiscard
+	}
+	if term == r.Term {
 		return CurrentTerm
 	}
 
-	if r.Term < term {
+	if term > r.Term {
 		return NewerTermUpdate
 	}
 
 	return OlderTermDiscard
 }
-
-type broadcastMsgFunc func()
 
 func (r *Raft) broadcastHeartBeatMsg() {
 	for k := range r.Prs {
@@ -440,4 +432,65 @@ func (r *Raft) broadcastHeartBeatMsg() {
 
 		r.msgs = append(r.msgs, msg)
 	}
+}
+
+func (r *Raft) broadcastRequestVote() {
+	index := r.RaftLog.LastIndex()
+	term, err := r.RaftLog.Term(index)
+
+	if err != nil {
+		return
+	}
+
+	for k := range r.Prs {
+		if k == r.id {
+			continue
+		}
+
+		msg := pb.Message{
+			MsgType: pb.MessageType_MsgRequestVote,
+			To:      k,
+			From:    r.id,
+			Term:    r.Term,
+			LogTerm: term,
+			Index:   index,
+		}
+
+		r.msgs = append(r.msgs, msg)
+	}
+}
+
+func (r *Raft) checkVoteResult() {
+	if len(r.Prs) == 0 {
+		r.becomeLeader()
+	}
+	accpetCnt := 0
+	rejectCnt := 0
+	for _, v := range r.votes {
+		if v {
+			accpetCnt += 1
+		} else {
+			rejectCnt += 1
+		}
+
+		if accpetCnt > len(r.Prs)/2 {
+			r.becomeLeader()
+			return
+		} else if rejectCnt > len(r.Prs)/2 {
+			r.becomeFollower(r.Term-1, 0)
+		}
+	}
+}
+
+func (r *Raft) handleRequestVote(m pb.Message) error {
+
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgRequestVoteResponse,
+		From:    r.id,
+		To:      m.GetFrom(),
+		Term:    r.Term,
+		Reject:  false,
+	})
+
+	return nil
 }
