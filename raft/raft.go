@@ -120,9 +120,11 @@ type Raft struct {
 	id uint64
 
 	Term uint64
+
+	// candidateId that received vote in current (from the raft paper)
 	Vote uint64
 
-	// the log
+	// the	 log
 	RaftLog *RaftLog
 
 	// log replication progress of each peers
@@ -179,7 +181,7 @@ func newRaft(c *Config) *Raft {
 		Prs:              make(map[uint64]*Progress),
 		State:            StateFollower,
 		Term:             0,
-		Vote:             0,
+		Vote:             None,
 		votes:            make(map[uint64]bool),
 		RaftLog:          newLog(c.Storage),
 		msgs:             make([]pb.Message, 0),
@@ -219,13 +221,13 @@ func (r *Raft) tick() {
 	switch r.State {
 	case StateFollower:
 		r.electionElapsed++
-		if r.electionElapsed >= r.electionTimeout {
+		if r.electionElapsed > r.electionTimeout {
 			r.becomeCandidate()
 			r.broadcastRequestVote()
 		}
 	case StateCandidate:
 		r.electionElapsed++
-		if r.electionElapsed >= r.electionTimeout {
+		if r.electionElapsed > r.electionTimeout {
 			r.becomeCandidate()
 			r.broadcastRequestVote()
 		}
@@ -245,6 +247,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.State = StateFollower
 	r.Vote = 0
 	r.heartbeatElapsed = 0
+	r.electionElapsed = 0
 	// log.Printf("raft: raft instance %d switch to follower state, term: %d", r.id, r.Term)
 }
 
@@ -484,12 +487,20 @@ func (r *Raft) checkVoteResult() {
 
 func (r *Raft) handleRequestVote(m pb.Message) error {
 
+	reject := true
+
+	// no vote in this term or from the same candidate
+	if r.Vote == None || r.Vote == m.GetFrom() {
+		reject = false
+		r.Vote = m.GetFrom()
+	}
+
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgRequestVoteResponse,
 		From:    r.id,
 		To:      m.GetFrom(),
 		Term:    r.Term,
-		Reject:  false,
+		Reject:  reject,
 	})
 
 	return nil
