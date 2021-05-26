@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -146,6 +147,8 @@ type Raft struct {
 	heartbeatTimeout int
 	// baseline of election interval
 	electionTimeout int
+	// randomized election interval between [e, 2e)
+	electionTimeoutRandomnized int
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
@@ -190,6 +193,8 @@ func newRaft(c *Config) *Raft {
 		leadTransferee:   0,
 	}
 
+	r.generateRndElectionTimeout()
+
 	for _, pr_id := range c.peers {
 		if pr_id == r.id {
 			continue
@@ -221,13 +226,13 @@ func (r *Raft) tick() {
 	switch r.State {
 	case StateFollower:
 		r.electionElapsed++
-		if r.electionElapsed > r.electionTimeout {
+		if r.electionElapsed > r.getRndElectionTimeout() {
 			r.becomeCandidate()
 			r.broadcastRequestVote()
 		}
 	case StateCandidate:
 		r.electionElapsed++
-		if r.electionElapsed > r.electionTimeout {
+		if r.electionElapsed > r.getRndElectionTimeout() {
 			r.becomeCandidate()
 			r.broadcastRequestVote()
 		}
@@ -260,6 +265,7 @@ func (r *Raft) becomeCandidate() {
 	r.electionElapsed = 0
 	// vote to self
 	r.votes[r.id] = true
+	r.generateRndElectionTimeout()
 	if len(r.Prs) == 0 {
 		r.becomeLeader()
 	}
@@ -504,4 +510,12 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 	})
 
 	return nil
+}
+
+func (r *Raft) generateRndElectionTimeout() {
+	r.electionTimeoutRandomnized = rand.Intn(r.electionTimeout) + r.electionTimeout
+}
+
+func (r *Raft) getRndElectionTimeout() int {
+	return r.electionTimeoutRandomnized
 }
