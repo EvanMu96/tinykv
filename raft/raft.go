@@ -226,13 +226,13 @@ func (r *Raft) tick() {
 	switch r.State {
 	case StateFollower:
 		r.electionElapsed++
-		if r.electionElapsed > r.getRndElectionTimeout() {
+		if r.electionElapsed >= r.getRndElectionTimeout() {
 			r.becomeCandidate()
 			r.broadcastRequestVote()
 		}
 	case StateCandidate:
 		r.electionElapsed++
-		if r.electionElapsed > r.getRndElectionTimeout() {
+		if r.electionElapsed >= r.getRndElectionTimeout() {
 			r.becomeCandidate()
 			r.broadcastRequestVote()
 		}
@@ -445,13 +445,6 @@ func (r *Raft) broadcastHeartBeatMsg() {
 }
 
 func (r *Raft) broadcastRequestVote() {
-	index := r.RaftLog.LastIndex()
-	term, err := r.RaftLog.Term(index)
-
-	if err != nil {
-		return
-	}
-
 	for k := range r.Prs {
 		if k == r.id {
 			continue
@@ -462,8 +455,8 @@ func (r *Raft) broadcastRequestVote() {
 			To:      k,
 			From:    r.id,
 			Term:    r.Term,
-			LogTerm: term,
-			Index:   index,
+			// LogTerm: term,
+			// Index:   index,
 		}
 
 		r.msgs = append(r.msgs, msg)
