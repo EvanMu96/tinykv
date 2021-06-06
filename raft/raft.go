@@ -250,6 +250,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Lead = lead
 	r.Term = term
 	r.State = StateFollower
+	r.generateRndElectionTimeout()
 	r.Vote = 0
 	r.heartbeatElapsed = 0
 	r.electionElapsed = 0
@@ -258,7 +259,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
-	// Your Code Here (2A).
+	// Your Code Here (2A).=
 	r.Term += 1
 	r.State = StateCandidate
 	r.Vote = 0
@@ -518,4 +519,19 @@ func (r *Raft) generateRndElectionTimeout() {
 
 func (r *Raft) getRndElectionTimeout() int {
 	return r.electionTimeoutRandomnized
+}
+
+func (r *Raft) getSoftState() *SoftState {
+	return &SoftState{
+		Lead:      r.Lead,
+		RaftState: r.State,
+	}
+}
+
+func (r *Raft) getHardState() pb.HardState {
+	return pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
+	}
 }

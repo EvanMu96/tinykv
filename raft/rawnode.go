@@ -73,7 +73,7 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
-	ready *Ready
+	prevReady *Ready
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
@@ -87,7 +87,7 @@ func NewRawNode(config *Config) (*RawNode, error) {
 
 	rn := RawNode{
 		Raft: raft,
-		ready: &Ready{
+		prevReady: &Ready{
 			SoftState: &SoftState{
 				Lead:      raft.Lead,
 				RaftState: raft.State,
@@ -169,12 +169,14 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return *rn.ready
+	return *rn.prevReady
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
+	// r := rn.Raft
+	// has equal softstate return true
 	return false
 }
 

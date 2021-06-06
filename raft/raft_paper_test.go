@@ -27,6 +27,7 @@ package raft
 
 import (
 	"fmt"
+	"log"
 	"reflect"
 	"sort"
 	"testing"
@@ -159,6 +160,7 @@ func testNonleaderStartElection(t *testing.T, state StateType) {
 	if !reflect.DeepEqual(msgs, wmsgs) {
 		t.Errorf("msgs = %v, want %v", msgs, wmsgs)
 	}
+	log.Printf("elapsed: %d, timeout: %d", r.electionElapsed, r.getRndElectionTimeout())
 }
 
 // TestLeaderElectionInOneRoundRPC tests all cases that may happen in
