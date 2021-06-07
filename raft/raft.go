@@ -251,7 +251,6 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Term = term
 	r.State = StateFollower
 	r.generateRndElectionTimeout()
-	r.Vote = 0
 	r.heartbeatElapsed = 0
 	r.electionElapsed = 0
 	// log.Printf("raft: raft instance %d switch to follower state, term: %d", r.id, r.Term)
@@ -267,7 +266,7 @@ func (r *Raft) becomeCandidate() {
 	// vote to self
 	r.votes[r.id] = true
 	r.generateRndElectionTimeout()
-	if len(r.Prs) <= 1 {
+	if len(r.Prs) == 0 {
 		r.becomeLeader()
 	}
 	// log.Printf("raft: raft instance %d switch to candidate state, term: %d", r.id, r.Term)
@@ -301,7 +300,9 @@ func (r *Raft) Step(m pb.Message) error {
 				r.broadcastRequestVote()
 			}
 		case pb.MessageType_MsgBeat:
-
+			if r.State == StateLeader {
+				r.broadcastHeartBeatMsg()
+			}
 		case pb.MessageType_MsgPropose:
 		}
 		return nil
@@ -336,6 +337,8 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgRequestVoteResponse:
 			r.votes[m.GetFrom()] = !m.GetReject()
 			r.checkVoteResult()
+		case pb.MessageType_MsgHeartbeat:
+			r.becomeFollower(m.GetTerm(), m.GetFrom())
 		}
 	case StateLeader:
 		switch m.MsgType {
@@ -353,7 +356,7 @@ func (r *Raft) Step(m pb.Message) error {
 		}
 	}
 
-	if m.MsgType == pb.MessageType_MsgRequestVote {
+	if m.GetTerm() >= r.Term && m.MsgType == pb.MessageType_MsgRequestVote {
 		err := r.handleRequestVote(m)
 		if err != nil {
 			return err
@@ -483,7 +486,20 @@ func (r *Raft) checkVoteResult() {
 }
 
 func (r *Raft) handleRequestVote(m pb.Message) error {
+	switch r.State {
+	case StateLeader:
+		r.handleRequestVoteLeader(m)
+	case StateCandidate:
+		r.handleRequestVoteCandidate(m)
+	case StateFollower:
+		r.handleRequestVoteFollower(m)
+	default:
+		return errors.New("unkown state")
+	}
+	return nil
+}
 
+func (r *Raft) handleRequestVoteFollower(m pb.Message) error {
 	reject := false
 
 	// no vote in this term or from the same candidate
@@ -509,7 +525,7 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 		}
 	}
 
-	if !reject && r.State == StateLeader {
+	if !reject {
 		r.becomeFollower(m.GetTerm(), m.GetFrom())
 	}
 
@@ -522,6 +538,18 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 	})
 
 	return nil
+}
+
+func (r *Raft) handleRequestVoteLeader(m pb.Message) error {
+	return r.handleRequestVoteFollower(m)
+}
+
+func (r *Raft) handleRequestVoteCandidate(m pb.Message) error {
+	// split vote
+	if r.Term == m.GetTerm() {
+		return nil
+	}
+	return r.handleRequestVoteFollower(m)
 }
 
 func (r *Raft) generateRndElectionTimeout() {
