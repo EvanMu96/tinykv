@@ -16,7 +16,7 @@ package raft
 
 import (
 	"errors"
-	"log"
+	"fmt"
 	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
@@ -234,8 +234,7 @@ func (r *Raft) tick() {
 	case StateCandidate:
 		r.electionElapsed++
 		if r.electionElapsed >= r.getRndElectionTimeout() {
-			r.becomeCandidate()
-			r.broadcastRequestVote()
+			r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgHup})
 		}
 	case StateLeader:
 		r.heartbeatElapsed++
@@ -268,7 +267,7 @@ func (r *Raft) becomeCandidate() {
 	// vote to self
 	r.votes[r.id] = true
 	r.generateRndElectionTimeout()
-	if len(r.Prs) == 0 {
+	if len(r.Prs) <= 1 {
 		r.becomeLeader()
 	}
 	// log.Printf("raft: raft instance %d switch to candidate state, term: %d", r.id, r.Term)
@@ -297,8 +296,10 @@ func (r *Raft) Step(m pb.Message) error {
 	if IsLocalMsg(m.MsgType) {
 		switch m.MsgType {
 		case pb.MessageType_MsgHup:
-			r.becomeCandidate()
-			r.broadcastRequestVote()
+			if r.State != StateLeader {
+				r.becomeCandidate()
+				r.broadcastRequestVote()
+			}
 		case pb.MessageType_MsgBeat:
 
 		case pb.MessageType_MsgPropose:
@@ -343,9 +344,7 @@ func (r *Raft) Step(m pb.Message) error {
 				return err
 			}
 		case pb.MessageType_MsgRequestVoteResponse:
-			if r.checkMsgTerm(m.GetTerm()) != OlderTermDiscard {
-				r.votes[m.GetFrom()] = !m.GetReject()
-			}
+			r.votes[m.GetFrom()] = !m.GetReject()
 			r.checkVoteResult()
 		}
 	case StateLeader:
@@ -477,10 +476,10 @@ func (r *Raft) checkVoteResult() {
 			rejectCnt += 1
 		}
 
-		if accpetCnt > len(r.Prs)/2 {
+		if accpetCnt > (len(r.Prs)+1)/2 {
 			r.becomeLeader()
 			return
-		} else if rejectCnt > len(r.Prs)/2 {
+		} else if rejectCnt > (len(r.Prs)+1)/2 {
 			r.becomeFollower(r.Term-1, 0)
 		}
 	}
@@ -497,9 +496,20 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 		r.Vote = m.GetFrom()
 	}
 
-	if r.RaftLog.Term() > m.GetTerm() || (r.Term == m.GetTerm() && r.RaftLog.LastIndex() > m.GetIndex()) {
+	my_index := r.RaftLog.LastIndex()
+
+	my_term, err := r.RaftLog.Term(my_index)
+
+	if err != nil {
+		return errors.New(fmt.Sprintf("cannot find log by index: %d", my_index))
+	}
+
+	if my_term > m.GetLogTerm() {
 		reject = true
-		log.Println(r.RaftLog.LastIndex(), m.GetIndex())
+	} else {
+		if my_term == m.GetLogTerm() && my_index > m.GetIndex() {
+			reject = true
+		}
 	}
 
 	r.msgs = append(r.msgs, pb.Message{
