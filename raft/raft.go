@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"log"
 	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
@@ -487,12 +488,18 @@ func (r *Raft) checkVoteResult() {
 
 func (r *Raft) handleRequestVote(m pb.Message) error {
 
-	reject := true
+	reject := false
 
 	// no vote in this term or from the same candidate
-	if r.Vote == None || r.Vote == m.GetFrom() {
-		reject = false
+	if r.Vote != None && r.Vote != m.GetFrom() {
+		reject = true
+	} else {
 		r.Vote = m.GetFrom()
+	}
+
+	if r.RaftLog.Term() > m.GetTerm() || (r.Term == m.GetTerm() && r.RaftLog.LastIndex() > m.GetIndex()) {
+		reject = true
+		log.Println(r.RaftLog.LastIndex(), m.GetIndex())
 	}
 
 	r.msgs = append(r.msgs, pb.Message{
