@@ -547,6 +547,13 @@ func (r *Raft) handleRequestVoteLeader(m pb.Message) error {
 func (r *Raft) handleRequestVoteCandidate(m pb.Message) error {
 	// split vote
 	if r.Term == m.GetTerm() {
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgRequestVoteResponse,
+			From:    r.id,
+			To:      m.GetFrom(),
+			Term:    r.Term,
+			Reject:  true,
+		})
 		return nil
 	}
 	return r.handleRequestVoteFollower(m)
