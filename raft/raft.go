@@ -321,11 +321,6 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleAppendEntries(m)
 		case pb.MessageType_MsgHeartbeat:
 			r.handleHeartbeat(m)
-		case pb.MessageType_MsgRequestVote:
-			err := r.handleRequestVote(m)
-			if err != nil {
-				return err
-			}
 		}
 	case StateCandidate:
 		switch m.MsgType {
@@ -338,11 +333,6 @@ func (r *Raft) Step(m pb.Message) error {
 				r.becomeFollower(m.GetTerm(), m.GetFrom())
 			}
 			r.handleAppendEntries(m)
-		case pb.MessageType_MsgRequestVote:
-			err := r.handleRequestVote(m)
-			if err != nil {
-				return err
-			}
 		case pb.MessageType_MsgRequestVoteResponse:
 			r.votes[m.GetFrom()] = !m.GetReject()
 			r.checkVoteResult()
@@ -360,6 +350,13 @@ func (r *Raft) Step(m pb.Message) error {
 			default:
 				return nil
 			}
+		}
+	}
+
+	if m.MsgType == pb.MessageType_MsgRequestVote {
+		err := r.handleRequestVote(m)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -510,6 +507,10 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 		if my_term == m.GetLogTerm() && my_index > m.GetIndex() {
 			reject = true
 		}
+	}
+
+	if !reject && r.State == StateLeader {
+		r.becomeFollower(m.GetTerm(), m.GetFrom())
 	}
 
 	r.msgs = append(r.msgs, pb.Message{
