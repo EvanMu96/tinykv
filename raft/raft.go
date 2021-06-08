@@ -239,7 +239,7 @@ func (r *Raft) tick() {
 	case StateLeader:
 		r.heartbeatElapsed++
 		if r.heartbeatElapsed >= r.heartbeatTimeout {
-			r.broadcastHeartBeatMsg()
+			r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgBeat})
 		}
 	}
 }
@@ -303,6 +303,7 @@ func (r *Raft) Step(m pb.Message) error {
 			if r.State == StateLeader {
 				r.broadcastHeartBeatMsg()
 			}
+			return errors.New("MsgBeat from non leader node")
 		case pb.MessageType_MsgPropose:
 		}
 		return nil
