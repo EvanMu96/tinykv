@@ -15,6 +15,9 @@
 package raft
 
 import (
+	"fmt"
+	golog "log"
+
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -30,6 +33,11 @@ type RaftLog struct {
 	// storage contains all stable entries since the last snapshot.
 	storage Storage
 
+	// log entries with index <= stabled are persisted to storage.
+	// It is used to record the logs that are not persisted by storage yet.
+	// Everytime handling `Ready`, the unstabled logs will be included.
+	stabled uint64
+
 	// committed is the highest log position that is known to be in
 	// stable storage on a quorum of nodes.
 	committed uint64
@@ -39,11 +47,6 @@ type RaftLog struct {
 	// Invariant: applied <= committed
 	applied uint64
 
-	// log entries with index <= stabled are persisted to storage.
-	// It is used to record the logs that are not persisted by storage yet.
-	// Everytime handling `Ready`, the unstabled logs will be included.
-	stabled uint64
-
 	// all entries that have not yet compact.
 	entries []pb.Entry
 
@@ -52,19 +55,25 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
-	maxNextEntsSize uint64
+	offset uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
+	// init by storage
+	offset, _ := storage.FirstIndex()
+	stabled, _ := storage.LastIndex()
+	// recover first to stabled into memory
+	ents, _ := storage.Entries(offset, stabled+1)
+
 	return &RaftLog{
 		storage:         storage,
-		committed:       0,
-		applied:         0,
-		stabled:         0,
-		entries:         make([]pb.Entry, 0),
+		stabled:         stabled,
+		offset:          offset,
+		applied:         offset - 1,
+		entries:         ents,
 		pendingSnapshot: nil,
 	}
 }
@@ -79,11 +88,11 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	if len(l.entries) == 0 || len(l.entries)-1 == int(l.stabled) {
+	if len(l.entries) == 0 {
 		return nil
 	}
 
-	return l.entries[l.stabled+1:]
+	return l.entries[l.stabled-l.offset+1:]
 }
 
 // nextEnts returns all the committed but not applied entries
@@ -92,7 +101,7 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 		return nil
 	}
 
-	return l.entries[l.applied+1 : l.committed+1]
+	return l.entries[l.applied-l.offset+1 : l.committed-l.offset+1]
 }
 
 // LastIndex return the last index of the log entries
@@ -109,9 +118,50 @@ func (l *RaftLog) LastIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
+	if i > l.LastIndex() {
+		return 0, nil
+	}
+
+	// get from unstabled
+	if len(l.entries) > 0 && i >= l.offset {
+		return l.entries[i-l.offset].Term, nil
+	}
+
 	term, err := l.storage.Term(i)
 	if err != nil {
 		return 0, err
 	}
+
 	return term, nil
+}
+
+func (l *RaftLog) leaderAppend(entries ...pb.Entry) {
+	if len(entries) <= 0 {
+		return
+	}
+	startIdx := entries[0].GetIndex()
+	if startIdx < l.committed {
+		golog.Panicln("the log should be append-only")
+	}
+	l.entries = append(l.entries, entries...)
+}
+
+func (l *RaftLog) maybeAppend(entries ...pb.Entry) {
+	// truncate current unstabled
+	if len(entries) == 0 {
+		return
+	}
+	idx := entries[0].GetIndex()
+	if idx > l.stabled && idx < uint64(len(l.entries))+l.offset {
+		l.entries = append(l.entries[:idx-l.offset], entries...)
+		return
+	} else if idx > l.LastIndex() {
+		l.entries = append(l.entries, entries...)
+	} else {
+		golog.Panicln("invalid log append operation")
+	}
+}
+
+func (l *RaftLog) String() string {
+	return fmt.Sprintf("commited=%d, applied=%d, entry offset=%d, len(l.entries)=%d", l.committed, l.applied, l.offset, len(l.entries))
 }
